@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -g -fopenmp
-LDFLAGS = -fopenmp -lncursesw  -ltinfo
+LDFLAGS = -fopenmp -lncurses  -ltinfo
 
 # Forrásfájlok
 SRCS = main.c world_utils.c entity_actions.c
@@ -28,6 +28,6 @@ clean:
 
 # "make run" parancs a program futtatásához (opcionális argumentummal)
 run: $(TARGET)
-	./$(TARGET) $(ARGS)
+	./$(TARGET) $(ARGS) 2> timings.log
 
 .PHONY: all clean run 

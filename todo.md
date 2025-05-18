@@ -9,10 +9,12 @@ Ez a dokumentum tartalmazza az ökoszisztéma szimulátor projekt hátralévő f
     *   [x] A szimulációs világ (rács) megjelenítése ncurses segítségével.
         *   [x] Rács határainak kirajzolása.
         *   [x] Üres mezők megjelenítése.
+        *   [x] Entitások megjelenítése a `world->grid` alapján (megakadályozza az elfedést).
     *   [x] Entitások megjelenítése a rácson:
         *   [x] Növények (pl. 'P' karakter zöld színnel).
         *   [x] Növényevők (pl. 'H' karakter sárga színnel).
         *   [x] Ragadozók (pl. 'C' karakter piros színnel).
+        *   [x] Manuálisan spawnolt állatok ideiglenes vizuális kiemelése.
     *   [x] A megjelenítés frissítése minden szimulációs lépés után.
     *   [x] Információs sáv megjelenítése (pl. aktuális lépésszám, entitások száma típusonként).
     *   [x] Wide karakterek támogatása (`ncursesw`, `locale`) az ékezetes karakterek helyes megjelenítéséhez.
@@ -31,6 +33,7 @@ Ez a dokumentum tartalmazza az ökoszisztéma szimulátor projekt hátralévő f
         *   [x] Kilépés a programból
     *   [x] Menü navigáció (fel/le nyilak vagy 'w'/'s') és kiválasztás ('Enter').
     *   [x] Billentyűzetről történő vezérlés implementálása a szimuláció futása közbeni kilépéshez (pl. 'q' billentyűvel).
+    *   [x] Entitások manuális spawnolása szimuláció közben ('p' - Növény, 'h' - Növényevő, 'c' - Ragadozó).
 
 4.  **Világ és Szimuláció Konfigurálhatósága (Beállítások Menü)**
     *   [x] Beállítások menü létrehozása.
@@ -42,10 +45,10 @@ Ez a dokumentum tartalmazza az ökoszisztéma szimulátor projekt hátralévő f
         *   [x] Gyors (pl. 50ms)
         *   [x] Normál (pl. 150ms - alapértelmezett)
         *   [x] Lassú (pl. 300ms)
-    *   [ ] Szimuláció maximális lépésszámának beállítása (3 szint, pl. Rövid, Közepes, Hosszú).
+    *   [x] Szimuláció maximális lépésszámának beállítása (3 szint, pl. Rövid, Közepes, Hosszú).
     *   [x] Beállítások alkalmazása a szimuláció indításakor.
     *   [x] "Vissza a főmenübe" opció.
-    *   [ ] Kezdeti entitásszámok beállításának lehetősége (egyelőre maradhat a `simulation_constants.h`-ban vagy fix érték).
+    *   [ ] Kezdeti entitásszámok beállításának lehetősége (jelenleg konstansként definiálva a `simulation_constants.h`-ban: `INITIAL_PLANTS`, `INITIAL_HERBIVORES`, `INITIAL_CARNIVORES`).
 
 ## Közepes prioritású feladatok
 
@@ -56,11 +59,16 @@ Ez a dokumentum tartalmazza az ökoszisztéma szimulátor projekt hátralévő f
         *   [ ] `valgrind` vagy hasonló eszköz használata memóriaszivárgások és hibák felderítésére.
         *   [ ] Dinamikusan allokált memória megfelelő felszabadításának biztosítása mindenhol.
     *   [ ] Párhuzamosítás hatékonyságának mérése és elemzése. Esetleges optimalizációs lehetőségek felkutatása.
+    *   [ ] Entitások feldolgozási sorrendjének optimalizálása (`simulate_step`: Ragadozók -> Növényevők -> Növények) - [x] Implementálva, tesztelés/finomhangolás alatt.
+    *   [ ] Evési logika módosítása (csak szomszédos mezőről) - [x] Implementálva, tesztelés/finomhangolás alatt.
 
 6.  **Makefile Bővítése és Karbantartása**
     *   [x] Ncurses könyvtár linkelésének hozzáadása a `Makefile`-hoz (`-lncursesw`).
     *   [ ] `clean` cél kiterjesztése, hogy minden generált fájlt (objektumfájlok, futtatható állomány) töröljön (már létezik, de ellenőrizni).
     *   [ ] Opcionális: `debug` fordítási cél hozzáadása hibakeresési szimbólumokkal (`-g`) (már benne van a CFLAGS-ban).
+    *   [x] A `README.md` frissítése a program használati utasításaival, beleértve az ncurses felület kezelését, beállításokat és a fordítási lépéseket.
+    *   [x] A `dokumentacio.md` kiegészítése az új funkciók (ncurses UI, főmenü, beállítások, spawnolás, logikai változások) leírásával.
+    *   [x] Kódkommentek átnézése, szükség szerinti javítása és kiegészítése.
 
 ## Alacsony prioritású feladatok / További fejlesztési ötletek
 
@@ -71,11 +79,11 @@ Ez a dokumentum tartalmazza az ökoszisztéma szimulátor projekt hátralévő f
 8.  **Dokumentáció Frissítése és Kiegészítése (`README.md`, `dokumentacio.md`)**
     *   [ ] A `README.md` frissítése a program használati utasításaival, beleértve az ncurses felület kezelését, beállításokat és a fordítási lépéseket.
     *   [ ] A `dokumentacio.md` kiegészítése az új funkciók (ncurses UI, főmenü, beállítások) leírásával.
-    *   [ ] Kódkommentek átnézése, szükség szerinti javítása és kiegészítése.
+    *   [x] Kódkommentek átnézése, szükség szerinti javítása és kiegészítése.
 
 9.  **Speciális Funkciók (Opcionális)**
     *   [ ] Szimuláció állapotának mentése fájlba és betöltése.
     *   [ ] Logolási mechanizmus események rögzítésére.
-    *   [ ] Maximális entitásszám korlátjának bevezetése (a túlszaporodás ellen).
+    *   [x] Maximális entitásszám korlátjának bevezetése (a túlszaporodás ellen) típusonként (`MAX_PLANTS`, `MAX_HERBIVORES`, `MAX_CARNIVORES`).
 
 Ez a lista kiindulópontként szolgál. A fejlesztés során újabb feladatok merülhetnek fel, vagy a meglévők prioritása változhat. 

@@ -3,15 +3,17 @@
 #include <time.h>
 
 #include "world_utils.h"
-#include "simulation_constants.h" // Szükséges az INITIAL_ENTITY_CAPACITY miatt
+#include "simulation_constants.h"
 
-// Világ létrehozása
+// Létrehozza és inicializálja a szimulációs világot a megadott méretekkel.
+// Lefoglalja a memóriát a világ struktúrának, a két rácsnak (grid és next_grid)
+// és a két listának (entities és next_entities).
 World *create_world(int width, int height)
 {
     World *world = (World *)malloc(sizeof(World));
     if (!world)
     {
-        perror("Hiba a Világ struktúra memória foglalásakor");
+        perror("Hiba a világ struktúra memória foglalásakor");
         return NULL;
     }
 
@@ -20,10 +22,10 @@ World *create_world(int width, int height)
     world->entity_count = 0;
     world->next_entity_count = 0;
     world->next_entity_id = 0;
-    world->entity_capacity = INITIAL_ENTITY_CAPACITY;
-    world->next_entity_capacity = INITIAL_ENTITY_CAPACITY;
+    world->entity_capacity = MAX_TOTAL_ENTITIES;
+    world->next_entity_capacity = MAX_TOTAL_ENTITIES;
 
-    world->entities = (Entity *)malloc(world->entity_capacity * sizeof(Entity));
+    world->entities = (Entity *)malloc(MAX_TOTAL_ENTITIES * sizeof(Entity));
     if (!world->entities)
     {
         perror("Hiba az aktuális entitások tömbjének memória foglalásakor");
@@ -31,7 +33,7 @@ World *create_world(int width, int height)
         return NULL;
     }
 
-    world->next_entities = (Entity *)malloc(world->next_entity_capacity * sizeof(Entity));
+    world->next_entities = (Entity *)malloc(MAX_TOTAL_ENTITIES * sizeof(Entity));
     if (!world->next_entities)
     {
         perror("Hiba a következő entitások tömbjének memória foglalásakor");
@@ -98,12 +100,13 @@ World *create_world(int width, int height)
         }
     }
 
-    srand(time(NULL)); // Ezt elég egyszer meghívni, lehet, hogy a main()-be jobb lenne.
-                       // De itt hagyom, mert a create_world hívásakor releváns lehet a randomitás, ha pl. add_entity közvetlenül használja.
+    srand(time(NULL));
     return world;
 }
 
-// Entitás hozzáadása a világhoz (kezdeti feltöltéshez)
+// Hozzáad egy új entitást a világhoz a szimuláció kezdeti feltöltése során.
+// Ez a függvény közvetlenül a world->entities tömbbe és a world->grid-be írja az új entitást.
+// Szükség esetén dinamikusan növeli az entities tömb kapacitását.
 Entity *add_entity_to_world_initial(World *world, EntityType type, Coordinates pos, int energy, int age, int sight_range)
 {
     if (!world)
@@ -118,17 +121,10 @@ Entity *add_entity_to_world_initial(World *world, EntityType type, Coordinates p
         return NULL; // Cella foglalt
     }
 
-    if (world->entity_count >= world->entity_capacity)
+    if (world->entity_count >= MAX_TOTAL_ENTITIES)
     {
-        world->entity_capacity *= 2;
-        Entity *new_array = (Entity *)realloc(world->entities, world->entity_capacity * sizeof(Entity));
-        if (!new_array)
-        {
-            perror("Hiba az aktuális entitások tömbjének átméretezésekor (kezdeti)");
-            world->entity_capacity /= 2;
-            return NULL;
-        }
-        world->entities = new_array;
+        fprintf(stderr, "Hiba: Elérte a maximális entitás számot (%d), nem lehet új entitást hozzáadni (kezdeti).\n", MAX_TOTAL_ENTITIES);
+        return NULL; // Nincs több hely
     }
 
     Entity *new_entity = &world->entities[world->entity_count];
@@ -140,13 +136,16 @@ Entity *add_entity_to_world_initial(World *world, EntityType type, Coordinates p
     new_entity->sight_range = sight_range;
     new_entity->last_reproduction_step = -1;
     new_entity->last_eating_step = -1;
+    new_entity->just_spawned_by_keypress = false; // Alapértelmezetten hamis
 
     world->grid[pos.y][pos.x].entity = new_entity;
     world->entity_count++;
     return new_entity;
 }
 
-// Világ inicializálása entitásokkal
+// Inicializálja a világot a megadott számú növénnyel, növényevővel és ragadozóval.
+// Véletlenszerűen helyezi el az entitásokat az üres cellákba a `world->grid`-en.
+// Meghatározott számú próbálkozást tesz minden egyes entitás elhelyezésére.
 void initialize_world(World *world, int num_plants, int num_herbivores, int num_carnivores)
 {
     if (!world)
@@ -214,7 +213,9 @@ void initialize_world(World *world, int num_plants, int num_herbivores, int num_
     // printf("%d/%d ragadozó elhelyezve.\n", placed_count, num_carnivores);
 }
 
-// Világ által lefoglalt memória felszabadítása
+// Felszabadítja a World objektum és annak minden dinamikusan foglalt erőforrását.
+// rácsok sorai és maguk a rácso
+// az entitáslisták (entities, next_entities).
 void free_world(World *world)
 {
     if (!world)
@@ -245,16 +246,13 @@ void free_world(World *world)
     free(world);
 }
 
-// Ellenőrzi, hogy egy pozíció érvényes-e a világ határain belül.
+// Ellenőrzi, hogy egy adott (x, y) pozíció érvényes-e, azaz a világ határain belül esik-e.
+// Visszatérési érték: 1, ha érvényes, 0 egyébként.
 int is_valid_pos(const World *world, int x, int y)
 {
     return world && x >= 0 && x < world->width && y >= 0 && y < world->height;
 }
 
-// Visszaad egy véletlenszerűen kiválasztott, a megadott pozícióval szomszédos üres cella koordinátáját.
-// Ha nincs ilyen, akkor az eredeti pozíciót adja vissza.
-// Ez a függvény NEM garantálja, hogy az üres cella továbbra is üres marad a hívás és a felhasználás között,
-// különösen párhuzamos környezetben. A hívónak kell ezt kezelnie.
 Coordinates get_random_adjacent_empty_cell(World *world, Coordinates pos)
 {
     Coordinates adjacent_cells[8];
@@ -287,20 +285,26 @@ Coordinates get_random_adjacent_empty_cell(World *world, Coordinates pos)
     }
 }
 
-// Új függvény: Kiszámolja a legjobb lépést egy adott célpozíció felé
-// Figyelem: Ez a world->grid alapján ellenőrzi az üres cellákat.
+// Kiszámítja a következő lépés koordinátáit `current_pos`-ból `target_pos` felé.
+// A cél az, hogy egy lépéssel közelebb kerüljön a célponthoz a Manhattan-távolság csökkentésével.
+// Először megpróbál az X tengely mentén közeledni, majd az Y tengely mentén, vagy fordítva,
+// attól függően, melyik irányban nagyobb a távolság. Priorizálja azokat a lépéseket,
+// amelyek mindkét tengelyen csökkentik a távolságot (átlós lépés), ha lehetséges.
+// A függvény nem ellenőrzi, hogy a célcella (a lépés utáni pozíció) üres-e vagy érvényes-e.
+// Ezt a hívó félnek kell kezelnie, ha szükséges.
+// Ha a `current_pos` már megegyezik `target_pos`-szal, vagy nem tud közelebb lépni,
+// akkor `current_pos`-t adja vissza.
 Coordinates get_step_towards_target(World *world, Coordinates current_pos, Coordinates target_pos)
 {
-    Coordinates best_step = current_pos; // Alapértelmezés: marad a helyén
+    Coordinates best_step = current_pos;
     int min_dist_sq = (target_pos.x - current_pos.x) * (target_pos.x - current_pos.x) +
                       (target_pos.y - current_pos.y) * (target_pos.y - current_pos.y);
 
-    // Lehetséges 8 irány (Moore szomszédság)
+    // 8 irány
     int dx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
     int dy[] = {-1, -1, -1, 0, 0, 1, 1, 1};
 
-    // Véletlenszerű sorrendben vizsgáljuk az irányokat, hogy ne legyen kitüntetett irány
-    // ha több egyformán jó lépés van.
+    // random nézzük az iráynokat
     int order[] = {0, 1, 2, 3, 4, 5, 6, 7};
     for (int i = 0; i < 8; ++i)
     {
@@ -331,22 +335,15 @@ Coordinates get_step_towards_target(World *world, Coordinates current_pos, Coord
     return best_step;
 }
 
-// Entitások számolása típus szerint
-// Csak az AKTÍV (entity_count-ban lévő, érvényes ID-jű és pozitív energiájú) entitásokat számolja.
+// Megszámolja az adott `type` típusú entitásokat a `world->entities` listában.
 int count_entities_by_type(const World *world, EntityType type)
 {
     if (!world || !world->entities)
         return 0;
 
     int count = 0;
-    // Mivel a párhuzamosítás miatt az entitások sorrendje és "aktivitása" változhat a world->entities-ben,
-    // és az entity_count a releváns szám, ezért csak ezen belül iterálunk.
-    // Az entity_actions-ben lévő logika biztosítja, hogy az elpusztult entitások nem kerülnek
-    // a next_entities-be, és így a következő lépés entities tömbjébe sem.
-    // A megjelenítés mindig a `world->entities` és `world->entity_count` alapján történik.
     for (int i = 0; i < world->entity_count; ++i)
     {
-        // Extra ellenőrzés, bár elvileg az entity_count-ban lévőknek aktívnak kellene lenniük.
         if (world->entities[i].id >= 0 && world->entities[i].energy > 0 && world->entities[i].type == type)
         {
             count++;

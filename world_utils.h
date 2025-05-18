@@ -9,13 +9,12 @@ void free_world(World *world);
 void initialize_world(World *world, int num_plants, int num_herbivores, int num_carnivores);
 Entity *add_entity_to_world_initial(World *world, EntityType type, Coordinates pos, int energy, int age, int sight_range);
 
-// Pozíció validálása és segédfüggvények
-int is_valid_pos(const World *world, int x, int y);                        // world lehet const, mert nem módosítja
-Coordinates get_random_adjacent_empty_cell(World *world, Coordinates pos); // Ez módosíthatja a világot (ha pl. új entitást hozna létre, bár jelenleg nem teszi)
-                                                                           // de a paraméterében a 'world' nem const, ami rendben van.
+// Pozíció és segédfüggvények
+int is_valid_pos(const World *world, int x, int y);
+Coordinates get_random_adjacent_empty_cell(World *world, Coordinates pos);
 Coordinates get_step_towards_target(World *world, Coordinates current_pos, Coordinates target_pos);
 
-// Entitások számolása típus szerint
+// Az információs sávhoz
 int count_entities_by_type(const World *world, EntityType type);
 
 #endif // WORLD_UTILS_H

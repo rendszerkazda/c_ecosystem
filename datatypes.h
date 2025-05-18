@@ -1,7 +1,8 @@
-#ifndef DATATYPES_H
+#ifndef DATATYPES_H // Ha még nincs a header definiálva
 #define DATATYPES_H
 
-// Enum for entity types
+#include <stdbool.h>
+
 typedef enum
 {
     EMPTY, // Empty cell
@@ -10,23 +11,19 @@ typedef enum
     CARNIVORE
 } EntityType;
 
-// Coordinates struct
 typedef struct
 {
     int x;
     int y;
 } Coordinates;
 
-// Forward declaration for Entity struct (if needed in World)
 typedef struct Entity Entity;
 
-// Cell struct
 typedef struct
 {
-    Entity *entity; // Pointer to the entity in this cell, NULL if empty
+    Entity *entity; // Pointer a cellában lévő entitásra, NULL ha üres
 } Cell;
 
-// World struct
 typedef struct
 {
     int width;
@@ -41,10 +38,9 @@ typedef struct
     int next_entity_count;    // Entitások száma a következő állapotban
     int next_entity_capacity; // A 'next_entities' tömb kapacitása
 
-    int next_entity_id; // Következő kiosztandó egyedi ID (ez globális marad)
+    int next_entity_id; // Következő kiosztandó egyedi ID
 } World;
 
-// Entity struct
 struct Entity
 {
     int id; // Egyedi azonosító
@@ -53,10 +49,10 @@ struct Entity
     int energy;
     int age;
 
-    // Viselkedés-specifikus attribútumok (később bővíthető)
-    int sight_range;            // Pl. növényevőknek, ragadozóknak
+    int sight_range;
     int last_reproduction_step; // Melyik szimulációs lépésben szaporodott utoljára
-    int last_eating_step;       // Melyik szimulációs lépésben evett utoljára
+    int last_eating_step;
+    bool just_spawned_by_keypress; // Igaz, ha az billentyűvel hozták létre ebben a lépésben
 };
 
 #endif // DATATYPES_H

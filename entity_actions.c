@@ -1,100 +1,126 @@
 #include <stdio.h>
-#include <stdlib.h>  // rand() miatt, ha a jövőben kell
-#include <omp.h>     // OpenMP specifikus dolgokhoz, ha itt is szükséges lesz
-#include <stdbool.h> // bool, true, false definíciókhoz
+#include <stdlib.h> // rand()
+#include <omp.h>
+#include <stdbool.h>
+#include <math.h> // abs() miatt
 
 #include "entity_actions.h"
-#include "simulation_constants.h" // Paraméterekhez (pl. PLANT_REPRODUCTION_PROBABILITY)
+#include "simulation_constants.h" // Paraméterekhez
 #include "world_utils.h"          // Pl. get_random_adjacent_empty_cell, is_valid_pos
-#include "simulation_utils.h"     // Új include _commit_entity_to_next_state-hez
+#include "simulation_utils.h"
 
-// Növények akciói
+// 8 irányú szomszédságot ellenőriz.
+static bool are_positions_adjacent(Coordinates pos1, Coordinates pos2)
+{
+    int dx = abs(pos1.x - pos2.x);
+    int dy = abs(pos1.y - pos2.y);
+    // Szomszédosak, ha (dx <= 1 ÉS dy <= 1) ÉS (nem ugyanaz a pont, azaz dx != 0 VAGY dy != 0).
+    // Ez lefedi a 8 lehetséges szomszédos mezőt.
+    return (dx <= 1 && dy <= 1) && (dx != 0 || dy != 0);
+}
+
+// Növények akcióinak feldolgozása
+// A növények elsősorban szaporodnak, ha elegendő energiájuk van, letelt a szaporodási cooldown,
+// és a valószínűségi feltétel is teljesül.
+// Paraméterek:
+//  - world: A szimulációs világ pointere.
+//  - current_step_number: Az aktuális szimulációs lépés sorszáma.
+//  - current_plant_state: Pointer az eredeti növény állapotára a `world->entities` tömbben (csak olvasásra).
+//  - next_plant_state_prototype: Pointer a növény következő állapotának prototípusára, amit ez a függvény módosíthat.
 void process_plant_actions_parallel(World *world, int current_step_number, const Entity *current_plant_state, Entity *next_plant_state_prototype)
 {
-    // Növények csak szaporodnak, ha a feltételek adottak.
-    // A növény növekedését (energia gyűjtését) a simulate_step fő ciklusa már kezeli.
-
     // Szaporodási feltételek ellenőrzése
-    if (next_plant_state_prototype->energy >= PLANT_MAX_ENERGY / 2 &&                                         // Elég energia
-        (current_step_number - current_plant_state->last_reproduction_step) >= PLANT_REPRODUCTION_COOLDOWN && // Cooldown letelt
-        ((double)rand() / RAND_MAX) < PLANT_REPRODUCTION_PROBABILITY)                                         // Véletlenszerű esély
+    if (next_plant_state_prototype->energy >= PLANT_INITIAL_ENERGY &&                                         // Elegendő energia a szaporodáshoz
+        (current_step_number - current_plant_state->last_reproduction_step) >= PLANT_REPRODUCTION_COOLDOWN && // Szaporodási cooldown letelt
+        ((double)rand() / RAND_MAX) < PLANT_REPRODUCTION_PROBABILITY)                                         // Véletlenszerű esély a szaporodásra
     {
+        // Üres szomszédos cella keresése az aktuális rácsállapot alapján
         Coordinates empty_cell = get_random_adjacent_empty_cell(world, current_plant_state->position);
 
-        // Ellenőrizzük, hogy a kapott cella érvényes és valóban üres-e a *következő* rácson is
-        // (bár a get_random_adjacent_empty_cell az aktuálisat nézi, itt egy plusz óvatosság)
-        // és nem az eredeti pozíció.
+        // Ellenőrizzük, hogy a kapott cella érvényes-e és nem az eredeti pozíció
         if (is_valid_pos(world, empty_cell.x, empty_cell.y) &&
             (empty_cell.x != current_plant_state->position.x || empty_cell.y != current_plant_state->position.y))
-        // A world->next_grid ellenőrzése itt bonyolult lenne a párhuzamosság miatt,
-        // a _commit_entity_to_next_state kezeli az ütközést a next_grid-ben.
         {
-            Entity new_plant_candidate;
+            // Új növény csak akkor jön létre, ha a növények száma nem érte el a maximumot
+            if (count_entities_by_type(world, PLANT) < MAX_PLANTS)
+            {
+                Entity new_plant_candidate; // Új növény jelölt
 
-            // Új ID generálása atomikusan
-            int new_id;
+                // Új, egyedi ID generálása atomikusan a globális számlálóból
+                int new_id;
 #pragma omp atomic capture
-            new_id = world->next_entity_id++;
-            new_plant_candidate.id = new_id;
+                new_id = world->next_entity_id++;
+                new_plant_candidate.id = new_id;
 
-            new_plant_candidate.type = PLANT;
-            new_plant_candidate.position = empty_cell;
-            new_plant_candidate.energy = PLANT_MAX_ENERGY / 2; // Kezdeti energia az új növénynek
-            new_plant_candidate.age = 0;
-            new_plant_candidate.sight_range = 0;                              // Növénynek nincs látótávolsága
-            new_plant_candidate.last_reproduction_step = current_step_number; // Az új növény most "született", ez a legutóbbi szaporodása
-            new_plant_candidate.last_eating_step = -1;                        // Növény nem eszik
+                new_plant_candidate.type = PLANT;
+                new_plant_candidate.position = empty_cell;
+                new_plant_candidate.energy = PLANT_INITIAL_ENERGY; // Kezdeti energia az új növénynek
+                new_plant_candidate.age = 0;
+                new_plant_candidate.sight_range = 0;                              // Növénynek nincs látótávolsága
+                new_plant_candidate.last_reproduction_step = current_step_number; // Az új növény most "született", ez a legutóbbi szaporodása
+                new_plant_candidate.last_eating_step = -1;                        // Növény nem eszik
+                new_plant_candidate.just_spawned_by_keypress = false;
 
-            _commit_entity_to_next_state(world, new_plant_candidate);
+                _commit_entity_to_next_state(world, new_plant_candidate);
 
-            // Az eredeti (szülő) növény utolsó szaporodási idejének frissítése a következő állapotban
-            next_plant_state_prototype->last_reproduction_step = current_step_number;
-            // Esetleg csökkenthetnénk a szülő energiáját a szaporodás költségeként, ha lenne PLANT_REPRODUCTION_COST
+                // Az eredeti (szülő) növény utolsó szaporodási idejének frissítése a következő állapotban
+                next_plant_state_prototype->last_reproduction_step = current_step_number;
+            }
         }
     }
 }
 
-// Növényevők akciói
+// Növényevők akcióinak feldolgozása
+// Az akciók sorrendje és prioritása a következő:
+// 0. Kritikus evés: Ha az energia kritikusan alacsony, megpróbál enni egy szomszédos növényt
+// 1. Mozgás: Ha nem volt kritikus evés, megpróbál elmozdulni (növény felé vagy véletlenszerűen)
+// 2. Normál evés: Mozgás után (vagy ha nem mozgott és nem volt kritikus evés) megpróbál enni egy szomszédos növényt az új pozícióján
+// 3. Szaporodás: Ha nem evett (sem kritikusan, sem normálisan) és a feltételek adottak, megpróbál szaporodni
+// Az `action_taken_this_step` változó tárolja, hogy melyik fő akció történt meg
+// Paraméterek:
+//  - world
+//  - current_step_number: Az aktuális szimulációs lépés sorszáma.
+//  - current_herbivore_state_in_entities_array: Pointer az eredeti növényevő állapotára a `world->entities` tömbben; eredeti pozíció lekérdezése
+//  - next_herbivore_state_prototype: Pointer a növényevő következő állapotának prototípusára, amit ez a függvény módosít
 void process_herbivore_actions_parallel(World *world, int current_step_number, Entity *current_herbivore_state_in_entities_array, Entity *next_herbivore_state_prototype)
 {
-    // current_herbivore_state_in_entities_array az eredeti entitásra mutat a world->entities tömbben.
-    // next_herbivore_state_prototype a másolat, amit módosítunk és commit-olunk.
-
-    int action_taken_this_step = 0;
+    int action_taken_this_step = 0; // 0: semmi, 1: kritikus evés, 2: mozgás, 3: normál evés, 4: szaporodás
 
     // 0. Elsődleges ellenőrzés: Kritikus energia szintű evés
     if (next_herbivore_state_prototype->energy < HERBIVORE_CRITICAL_ENERGY_THRESHOLD)
     {
+        // Célpont keresése a látótávolságon belül.
         Entity *target_plant = find_target_in_range(world, current_herbivore_state_in_entities_array->position, next_herbivore_state_prototype->sight_range, PLANT);
-        if (target_plant)
+        // Evés csak akkor, ha a célpont közvetlenül szomszédos.
+        if (target_plant && are_positions_adjacent(current_herbivore_state_in_entities_array->position, target_plant->position))
         {
-            // int plant_current_energy_for_debug = 0; // Debug célokra maradhat, ha kell
             bool successfully_ate = false;
-#pragma omp critical(AccessEntityEnergyOnEating)
+            // Kritikus szakasz a célpont energiájának módosításához, megelőzve a versenyhelyzeteket,
+            // ha több növényevő is ugyanazt a növényt próbálná megenni egyszerre.
+            // Az `EATEN_ENERGY_MARKER` jelzi, hogy ezt a növényt már megették ebben a lépésben.
+#pragma omp critical // mivel több növényevő is ugyanazt a növényt probalhatja megenni
             {
-                if (target_plant->energy > 0)
+                if (target_plant->energy > 0) // Ellenőrizzük, hogy a növény még ehető-e (van energiája).
                 {
-                    // plant_current_energy_for_debug = target_plant->energy;
-                    target_plant->energy = EATEN_ENERGY_MARKER;
+                    target_plant->energy = EATEN_ENERGY_MARKER; // Jelöljük megevettként.
                     successfully_ate = true;
                 }
             }
             if (successfully_ate)
             {
-                next_herbivore_state_prototype->position = target_plant->position; // Ide lép az evés után
+                // next_herbivore_state_prototype->position = target_plant->position; // Ide lép az evés után
+                next_herbivore_state_prototype->position = current_herbivore_state_in_entities_array->position;
                 next_herbivore_state_prototype->energy += HERBIVORE_ENERGY_FROM_PLANT;
                 if (next_herbivore_state_prototype->energy > HERBIVORE_MAX_ENERGY)
                 {
                     next_herbivore_state_prototype->energy = HERBIVORE_MAX_ENERGY;
                 }
                 next_herbivore_state_prototype->last_eating_step = current_step_number;
-                action_taken_this_step = 1; // Akció megtörtént (kritikus evés)
+                action_taken_this_step = 1; // Kritikus evés
             }
         }
-        // Ha kritikusan alacsony az energia és nem tud enni, akkor ebben a körben nem tesz mást (action_taken_this_step marad 0).
     }
 
-    // ÚJ SORREND:
     // 1. Mozgás (ha nem történt kritikus evés)
     if (!action_taken_this_step &&
         next_herbivore_state_prototype->energy > HERBIVORE_MOVE_COST)
@@ -122,96 +148,89 @@ void process_herbivore_actions_parallel(World *world, int current_step_number, E
     }
 
     // 2. Táplálkozás (normál), ha nem történt kritikus evés
-    // Akkor is megpróbálhat enni, ha mozgott (action_taken_this_step == 2), vagy ha nem mozgott (action_taken_this_step == 0)
-    // De ha kritikus evés volt (action_taken_this_step == 1), akkor nem.
-    if (action_taken_this_step != 1) // Ha nem volt kritikus evés
+    if (action_taken_this_step != 1 && action_taken_this_step != 2) // Ha nem volt kritikus evés és nem volt mozgás
     {
-        // A célpontot az aktuális (lehet, hogy új) pozícióhoz képest keressük
+        // Célpont keresése az aktuális (next_herbivore_state_prototype->position) pozíció körül.
         Entity *target_plant_for_eat = find_target_in_range(world, next_herbivore_state_prototype->position, next_herbivore_state_prototype->sight_range, PLANT);
-        if (target_plant_for_eat)
+        if (target_plant_for_eat && are_positions_adjacent(next_herbivore_state_prototype->position, target_plant_for_eat->position))
         {
-            // int plant_current_energy_for_debug = 0;
             bool successfully_ate = false;
-#pragma omp critical(AccessEntityEnergyOnEating) // Ugyanaz a kritikus szakasz, mint fent
+            // Kritikus szakasz a célpont energiájának módosításához.
+#pragma omp critical
             {
-                // Fontos: Ellenőrizzük, hogy a célpont még mindig a várt helyen van-e, és él-e.
-                // A find_target_in_range az entities tömböt nézi, ami a kör eleji állapot.
-                // A target_plant_for_eat->position az eredeti pozíció.
-                // Ha az állat elmozdult, lehet, hogy a target_plant_for_eat már nincs a sight_range-en belül az új pozícióhoz képest.
-                // De a find_target_in_range már ezt a next_herbivore_state_prototype->position alapján teszi.
-                // Ellenőrizzük, hogy a target_plant_for_eat a növényevő *aktuális* pozíciójának szomszédja-e.
-                // Vagy egyszerűbben: ha a find_target_in_range talál valamit az ÚJ pozíció környékén.
-                // És az evés feltétele, hogy a target a közvetlen közelben legyen (pl. range 1).
-                // A find_target_in_range visszaadja a legközelebbit a sight_range-en belül.
-                // Ahhoz, hogy ténylegesen enni tudjon, a célpontnak a közvetlen szomszédos mezőn kell lennie.
-                // Ezt a feltételt a find_target_in_range nem garantálja, csak a sight_range-t.
-                // Azonban az "evés után oda lép" logika ezt implicit módon kezeli, ha a target_plant_for_eat->position lesz az új pozíció.
-                // De ha az állat nem lép oda, akkor csak akkor ehet, ha szomszédos.
-                // Egyszerűsítés: Tegyük fel, hogy a find_target_in_range elég. Ha a hatótávon belül van, megpróbálja enni.
-                // Az "evés után odalépés" miatt ez általában működni fog.
-
-                // A legfontosabb itt, hogy a target_plant_for_eat még mindig él-e.
+                // Fontos ellenőrizni, hogy a célpont (target_plant_for_eat) még mindig létezik és ehető-e.
+                // A find_target_in_range a world->entities alapján keres, de a target_plant_for_eat->energy értéke
+                // frissülhetett más szálak által (ezért a kritikus szakasz).
                 if (target_plant_for_eat->energy > 0)
                 {
-                    // plant_current_energy_for_debug = target_plant_for_eat->energy;
                     target_plant_for_eat->energy = EATEN_ENERGY_MARKER;
                     successfully_ate = true;
                 }
             }
             if (successfully_ate)
             {
-                next_herbivore_state_prototype->position = target_plant_for_eat->position; // Ide lép az evés után
+                // next_herbivore_state_prototype->position = target_plant_for_eat->position; // Ide lép az evés után
+                next_herbivore_state_prototype->position = current_herbivore_state_in_entities_array->position;
                 next_herbivore_state_prototype->energy += HERBIVORE_ENERGY_FROM_PLANT;
                 if (next_herbivore_state_prototype->energy > HERBIVORE_MAX_ENERGY)
                 {
                     next_herbivore_state_prototype->energy = HERBIVORE_MAX_ENERGY;
                 }
                 next_herbivore_state_prototype->last_eating_step = current_step_number;
-                // Ha mozgás volt (action_taken_this_step == 2), akkor az evés felülírja ezt az akciót
-                // Ha nem volt mozgás (action_taken_this_step == 0), akkor az evés lesz az akció
                 action_taken_this_step = 3; // Akció megtörtént (normál evés)
             }
         }
     }
 
     // 3. Szaporodás megpróbálása (ha nem történt kritikus evés, és nem történt normál evés)
-    // Ha mozgás történt (action_taken_this_step == 2) de evés nem (maradt 2), akkor is szaporodhat.
-    // Ha sem kritikus evés (1), sem normál evés (3) nem volt.
+    // Csak akkor szaporodik, ha van elég energiája, letelt a cooldown, és marad elég energia a túléléshez.
     if (action_taken_this_step != 1 && action_taken_this_step != 3 &&
         next_herbivore_state_prototype->energy >= HERBIVORE_REPRODUCTION_THRESHOLD &&
         (current_step_number - current_herbivore_state_in_entities_array->last_reproduction_step) >= HERBIVORE_REPRODUCTION_COOLDOWN &&
-        (next_herbivore_state_prototype->energy - HERBIVORE_REPRODUCTION_COST) > HERBIVORE_MOVE_COST) // Maradjon elég energia egy esetleges következő mozgáshoz
+        (next_herbivore_state_prototype->energy - HERBIVORE_REPRODUCTION_COST) > HERBIVORE_MOVE_COST) // Maradjon elég energia
     {
-        Coordinates empty_cell = get_random_adjacent_empty_cell(world, next_herbivore_state_prototype->position); // Az aktuális pozíció mellé
+        Coordinates empty_cell = get_random_adjacent_empty_cell(world, next_herbivore_state_prototype->position);
         if (is_valid_pos(world, empty_cell.x, empty_cell.y) &&
             (empty_cell.x != next_herbivore_state_prototype->position.x || empty_cell.y != next_herbivore_state_prototype->position.y))
         {
-            next_herbivore_state_prototype->energy -= HERBIVORE_REPRODUCTION_COST;
-            next_herbivore_state_prototype->last_reproduction_step = current_step_number;
+            // Új növényevő csak akkor jön létre, ha a növényevők száma nem érte el a maximumot.
+            if (count_entities_by_type(world, HERBIVORE) < MAX_HERBIVORES)
+            {
+                next_herbivore_state_prototype->energy -= HERBIVORE_REPRODUCTION_COST;
+                next_herbivore_state_prototype->last_reproduction_step = current_step_number;
 
-            Entity new_herbivore_candidate;
-            int new_id;
+                Entity new_herbivore_candidate;
+                int new_id;
 #pragma omp atomic capture
-            new_id = world->next_entity_id++;
-            new_herbivore_candidate.id = new_id;
-            new_herbivore_candidate.type = HERBIVORE;
-            new_herbivore_candidate.position = empty_cell;
-            new_herbivore_candidate.energy = HERBIVORE_INITIAL_ENERGY;
-            new_herbivore_candidate.age = 0;
-            new_herbivore_candidate.sight_range = HERBIVORE_SIGHT_RANGE;
-            new_herbivore_candidate.last_reproduction_step = current_step_number; // Újszülött most szaporodott "először"
-            new_herbivore_candidate.last_eating_step = -1;
-            _commit_entity_to_next_state(world, new_herbivore_candidate);
+                new_id = world->next_entity_id++;
+                new_herbivore_candidate.id = new_id;
+                new_herbivore_candidate.type = HERBIVORE;
+                new_herbivore_candidate.position = empty_cell;
+                new_herbivore_candidate.energy = HERBIVORE_INITIAL_ENERGY;
+                new_herbivore_candidate.age = 0;
+                new_herbivore_candidate.sight_range = HERBIVORE_SIGHT_RANGE;
+                new_herbivore_candidate.last_reproduction_step = current_step_number; // Újszülött most szaporodott "először"
+                new_herbivore_candidate.last_eating_step = -1;
+                new_herbivore_candidate.just_spawned_by_keypress = false;
+                _commit_entity_to_next_state(world, new_herbivore_candidate);
 
-            // Ha mozgás volt (action_taken_this_step == 2), akkor a szaporodás felülírja ezt az akciót
-            // Ha nem volt mozgás (action_taken_this_step == 0), akkor a szaporodás lesz az akció
-            action_taken_this_step = 4; // Akció megtörtént (szaporodás)
+                action_taken_this_step = 4; // Akció megtörtént (szaporodás)
+            }
         }
     }
-    // Ha action_taken_this_step 0 maradt, az entitás nem csinált semmit (pl. nem tudott mozogni, enni, szaporodni).
 }
 
-// Ragadozók akciói
+// Ragadozók akcióinak feldolgozása
+// Az akciók sorrendje és prioritása hasonló a növényevőkéhez:
+// 0. Kritikus evés: Ha az energia kritikusan alacsony, megpróbál enni egy szomszédos növényevőt
+// 1. Mozgás: Ha nem volt kritikus evés, megpróbál elmozdulni (növényevő felé vagy véletlenszerűen)
+// 2. Normál evés: Mozgás után (vagy ha nem mozgott és nem volt kritikus evés) megpróbál enni egy szomszédos növényevőt
+// 3. Szaporodás: Ha nem evett és a feltételek adottak, megpróbál szaporodni
+// Paraméterek:
+//  - world
+//  - current_step_number: Az aktuális szimulációs lépés sorszáma.
+//  - current_carnivore_state_in_entities_array: Pointer az eredeti ragadozó állapotára a world->entities tömbben
+//  - next_carnivore_state_prototype: Pointer a ragadozó következő állapotának prototípusára
 void process_carnivore_actions_parallel(World *world, int current_step_number, Entity *current_carnivore_state_in_entities_array, Entity *next_carnivore_state_prototype)
 {
     int action_taken_this_step = 0; // 0: semmi, 1: kritikus evés, 2: mozgás, 3: normál evés, 4: szaporodás
@@ -219,21 +238,25 @@ void process_carnivore_actions_parallel(World *world, int current_step_number, E
     // 0. Elsődleges ellenőrzés: Kritikus energia szintű evés
     if (next_carnivore_state_prototype->energy < CARNIVORE_CRITICAL_ENERGY_THRESHOLD)
     {
+        // Célpont (növényevő) keresése a látótávolságon belül, az eredeti pozíció alapján
         Entity *target_herbivore = find_target_in_range(world, current_carnivore_state_in_entities_array->position, next_carnivore_state_prototype->sight_range, HERBIVORE);
-        if (target_herbivore)
+        // Evés csak akkor, ha a célpont közvetlenül szomszédos
+        if (target_herbivore && are_positions_adjacent(current_carnivore_state_in_entities_array->position, target_herbivore->position))
         {
             bool successfully_ate_herbivore = false;
-#pragma omp critical(AccessEntityEnergyOnEating)
+            // Kritikus szakasz a célpont (növényevő) energiájának módosítására
+#pragma omp critical
             {
-                if (target_herbivore->energy > 0)
+                if (target_herbivore->energy > 0) // Ellenőrizzük, hogy a növényevő még ehető-e
                 {
-                    target_herbivore->energy = EATEN_ENERGY_MARKER;
+                    target_herbivore->energy = EATEN_ENERGY_MARKER; // Jelöljük megevettként
                     successfully_ate_herbivore = true;
                 }
             }
             if (successfully_ate_herbivore)
             {
-                next_carnivore_state_prototype->position = target_herbivore->position; // Ide lép az evés után
+                // next_carnivore_state_prototype->position = target_herbivore->position;
+                next_carnivore_state_prototype->position = current_carnivore_state_in_entities_array->position;
                 next_carnivore_state_prototype->energy += CARNIVORE_ENERGY_FROM_HERBIVORE;
                 if (next_carnivore_state_prototype->energy > CARNIVORE_MAX_ENERGY)
                 {
@@ -245,9 +268,10 @@ void process_carnivore_actions_parallel(World *world, int current_step_number, E
         }
     }
 
-    // ÚJ SORREND:
     // 1. Mozgás (ha nem történt kritikus evés)
-    if (!action_taken_this_step && // Csak akkor, ha action_taken_this_step == 0
+    // Célpont (növényevő) keresése a látótávolságon belül, és afelé lépés
+    // Ha nincs célpont, véletlenszerű mozgás
+    if (!action_taken_this_step &&
         next_carnivore_state_prototype->energy > CARNIVORE_MOVE_COST)
     {
         Coordinates old_pos = current_carnivore_state_in_entities_array->position;
@@ -273,23 +297,26 @@ void process_carnivore_actions_parallel(World *world, int current_step_number, E
     }
 
     // 2. Táplálkozás (normál), ha nem történt kritikus evés
-    if (action_taken_this_step != 1) // Ha nem volt kritikus evés
+    if (action_taken_this_step != 1)
     {
-        Entity *target_herb_for_eat = find_target_in_range(world, next_carnivore_state_prototype->position, next_carnivore_state_prototype->sight_range, HERBIVORE);
-        if (target_herb_for_eat)
+        // Célpont keresése az aktuális (next_carnivore_state_prototype->position) pozíció körül
+        Entity *target_herbivore_for_eat = find_target_in_range(world, next_carnivore_state_prototype->position, next_carnivore_state_prototype->sight_range, HERBIVORE);
+        if (target_herbivore_for_eat && are_positions_adjacent(next_carnivore_state_prototype->position, target_herbivore_for_eat->position))
         {
             bool successfully_ate_herbivore = false;
-#pragma omp critical(AccessEntityEnergyOnEating) // Ugyanaz a kritikus szakasz
+            // Kritikus szakasz a célpont energiájának módosításához.
+#pragma omp critical
             {
-                if (target_herb_for_eat->energy > 0)
+                if (target_herbivore_for_eat->energy > 0)
                 {
-                    target_herb_for_eat->energy = EATEN_ENERGY_MARKER;
+                    target_herbivore_for_eat->energy = EATEN_ENERGY_MARKER;
                     successfully_ate_herbivore = true;
                 }
             }
             if (successfully_ate_herbivore)
             {
-                next_carnivore_state_prototype->position = target_herb_for_eat->position; // Ide lép az evés után
+                next_carnivore_state_prototype->position = target_herbivore_for_eat->position; // Ide lép az evés után
+                // next_carnivore_state_prototype->position = current_carnivore_state_in_entities_array->position;
                 next_carnivore_state_prototype->energy += CARNIVORE_ENERGY_FROM_HERBIVORE;
                 if (next_carnivore_state_prototype->energy > CARNIVORE_MAX_ENERGY)
                 {
@@ -301,7 +328,7 @@ void process_carnivore_actions_parallel(World *world, int current_step_number, E
         }
     }
 
-    // 3. Szaporodás megpróbálása (ha nem volt kritikus evés, és nem volt normál evés)
+    // 3. Szaporodás megpróbálása (ha nem történt sem kritikus, sem normál evés)
     if (action_taken_this_step != 1 && action_taken_this_step != 3 &&
         next_carnivore_state_prototype->energy >= CARNIVORE_REPRODUCTION_THRESHOLD &&
         (current_step_number - current_carnivore_state_in_entities_array->last_reproduction_step) >= CARNIVORE_REPRODUCTION_COOLDOWN &&
@@ -311,59 +338,67 @@ void process_carnivore_actions_parallel(World *world, int current_step_number, E
         if (is_valid_pos(world, empty_cell.x, empty_cell.y) &&
             (empty_cell.x != next_carnivore_state_prototype->position.x || empty_cell.y != next_carnivore_state_prototype->position.y))
         {
-            next_carnivore_state_prototype->energy -= CARNIVORE_REPRODUCTION_COST;
-            next_carnivore_state_prototype->last_reproduction_step = current_step_number;
+            // Új ragadozó csak akkor jön létre, ha a ragadozók száma nem érte el a maximumot
+            if (count_entities_by_type(world, CARNIVORE) < MAX_CARNIVORES)
+            {
+                next_carnivore_state_prototype->energy -= CARNIVORE_REPRODUCTION_COST;
+                next_carnivore_state_prototype->last_reproduction_step = current_step_number;
 
-            Entity new_carnivore_candidate;
-            int new_id;
+                Entity new_carnivore_candidate;
+                int new_id;
 #pragma omp atomic capture
-            new_id = world->next_entity_id++;
-            new_carnivore_candidate.id = new_id;
-            new_carnivore_candidate.type = CARNIVORE;
-            new_carnivore_candidate.position = empty_cell;
-            new_carnivore_candidate.energy = CARNIVORE_INITIAL_ENERGY;
-            new_carnivore_candidate.age = 0;
-            new_carnivore_candidate.sight_range = CARNIVORE_SIGHT_RANGE;
-            new_carnivore_candidate.last_reproduction_step = current_step_number;
-            new_carnivore_candidate.last_eating_step = -1;
-            _commit_entity_to_next_state(world, new_carnivore_candidate);
+                new_id = world->next_entity_id++;
+                new_carnivore_candidate.id = new_id;
+                new_carnivore_candidate.type = CARNIVORE;
+                new_carnivore_candidate.position = empty_cell;
+                new_carnivore_candidate.energy = CARNIVORE_INITIAL_ENERGY;
+                new_carnivore_candidate.age = 0;
+                new_carnivore_candidate.sight_range = CARNIVORE_SIGHT_RANGE;
+                new_carnivore_candidate.last_reproduction_step = current_step_number;
+                new_carnivore_candidate.last_eating_step = -1;
+                new_carnivore_candidate.just_spawned_by_keypress = false;
+                _commit_entity_to_next_state(world, new_carnivore_candidate);
 
-            action_taken_this_step = 4; // Szaporodás
+                action_taken_this_step = 4; // Szaporodás
+            }
         }
     }
 }
 
-// Keres egy adott típusú célpontot a megadott hatósugáron belül.
-// Visszaadja a legközelebbi célpontra mutató pointert, vagy NULL-t, ha nincs.
-// Fontos: Ez a függvény az AKTUÁLIS `world->grid` és `world->entities` alapján keres.
+// Segédfüggvény, amely megkeresi a legközelebbi, adott típusú célpontot a megadott center pozíció körüli range látótávolságon belül
+// Csak élő (pozitív energiájú) és még nem megevett entitásokat vesz figyelembe
+// A keresés a world->entities tömbön (azaz a szimulációs lépés eleji állapoton) történik
+// Végigiterál az összes entitáson, és kiválasztja azt, amelyik:
+//  1. Megfelel a target_type-nak
+//  2. Élő és nem EATEN_ENERGY_MARKER
+//  3. A center-től számított Manhattan-távolsága kisebb vagy egyenlő, mint range
+//  4. Az összes ilyen közül a legkisebb Manhattan-távolsággal rendelkezik
+// Ha több entitás is azonos minimális távolságra van, az iteráció során először megtaláltat adja vissza
+// Visszaadja a legközelebbi célpontra mutató pointert, vagy NULL-t, ha nincs ilyen
 Entity *find_target_in_range(World *world, Coordinates center, int range, EntityType target_type)
 {
-    if (!world || range <= 0)
+    if (!world || range < 0)
         return NULL;
 
     Entity *closest_target = NULL;
-    int min_dist_sq = range * range + 1; // Négyzetes távolság, így nem kell gyököt vonni
-
-    // Egyszerűbb (de nem a leghatékonyabb) módszer: bejárjuk a teljes entities listát.
-    // Hatékonyabb lenne a grid-et használni a range-en belüli kereséshez.
-    // De a párhuzamosítás miatt az entities lista bejárása lehet, hogy egyszerűbb és kevésbé hibalehetőség.
-    // Figyelem: Ez az aktuális entitásokat nézi!
+    int min_manhattan_dist = range + 1; // Kezdeti minimális távolság, aminél nagyobbat nem fogadunk el.
 
     for (int i = 0; i < world->entity_count; ++i)
     {
-        Entity *potential_target = &world->entities[i]; // Pointer az AKTUÁLIS entitáslistából!
+        Entity *potential_target = &world->entities[i];
 
-        if (potential_target->type == target_type && potential_target->energy > 0)
+        if (potential_target->type == target_type &&
+            potential_target->energy > 0 && potential_target->energy != EATEN_ENERGY_MARKER)
         {
-            int dx = potential_target->position.x - center.x;
-            int dy = potential_target->position.y - center.y;
-            int dist_sq = dx * dx + dy * dy;
+            int dx = abs(potential_target->position.x - center.x);
+            int dy = abs(potential_target->position.y - center.y);
+            int manhattan_dist = dx + dy;
 
-            if (dist_sq <= range * range)
-            { // Hatósugáron belül van
-                if (dist_sq < min_dist_sq)
+            if (manhattan_dist <= range) // Hatótávon belül van.
+            {
+                if (manhattan_dist < min_manhattan_dist)
                 {
-                    min_dist_sq = dist_sq;
+                    min_manhattan_dist = manhattan_dist;
                     closest_target = potential_target;
                 }
             }
