@@ -47,12 +47,3 @@ A részletes tennivalók listája a `todo.md` fájlban található.
 
 A program működéséről, adatstruktúráiról és a szimulációs logikáról részletesebb leírás a `dokumentacio.md` fájlban található.
 
-## Fejlesztési Útiterv
-
-- [ ] Adatszerkezetek implementálása a világhoz és az élőlényekhez.
-- [ ] Inicializációs logika kidolgozása.
-- [ ] Mozgási, táplálkozási és szaporodási szabályok implementálása.
-- [ ] Szimulációs ciklus megvalósítása.
-- [ ] OpenMP párhuzamosítás finomhangolása.
-- [ ] Parancssori argumentumok kezelése (pl. világméret, entitások száma).
-- [ ] Egyszerű szöveges vagy grafikus megjelenítés. 
