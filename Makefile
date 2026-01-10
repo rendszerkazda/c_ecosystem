@@ -1,4 +1,4 @@
-CC = gcc
+CC = mpicc
 CFLAGS = -Wall -Wextra -g -fopenmp
 LDFLAGS = -fopenmp -lncurses  -ltinfo
 

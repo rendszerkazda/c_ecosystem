@@ -1,7 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <stdarg.h>
 #include <omp.h>
+#include <mpi.h>
 #include <ncurses.h>
 #include <string.h>
 #include <locale.h>
@@ -25,6 +27,38 @@
 #define COLOR_PAIR_SETTINGS_VALUE 9     // Kiválasztott beállítás értékének színe
 #define COLOR_PAIR_SPAWNED_HERBIVORE 10 // Kiemelt háttérrel
 #define COLOR_PAIR_SPAWNED_CARNIVORE 11 // Kiemelt háttérrel
+
+#define DEBUG_LOG_LINES 3
+#define DEBUG_LOG_MAX_LENGTH 256
+
+#define CMD_START 1
+#define CMD_EXIT 0
+
+char debug_log_buffer[DEBUG_LOG_LINES][DEBUG_LOG_MAX_LENGTH];
+
+void init_debug_log()
+{
+    for (int i = 0; i < DEBUG_LOG_LINES; i++)
+    {
+        memset(debug_log_buffer[i], 0, DEBUG_LOG_MAX_LENGTH);
+    }
+}
+
+void add_debug_log(const char *format, ...)
+{
+    char buffer[DEBUG_LOG_MAX_LENGTH];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, DEBUG_LOG_MAX_LENGTH, format, args);
+    va_end(args);
+
+    // Shiftelés felfelé: a legrégebbi törlődik
+    for (int i = 0; i < DEBUG_LOG_LINES - 1; i++)
+    {
+        strncpy(debug_log_buffer[i], debug_log_buffer[i + 1], DEBUG_LOG_MAX_LENGTH);
+    }
+    strncpy(debug_log_buffer[DEBUG_LOG_LINES - 1], buffer, DEBUG_LOG_MAX_LENGTH);
+}
 
 // Főmenüelemek
 typedef enum
@@ -78,9 +112,10 @@ typedef struct
     WorldSizeSetting world_size_choice;
     DelaySetting delay_choice;
     SimulationStepsSetting steps_choice;
+    bool debug_mode;
 } SimulationSettings;
 
-SimulationSettings current_settings = {SIZE_MEDIUM, DELAY_NORMAL, STEPS_MEDIUM}; // alapértelmezett beállítások
+SimulationSettings current_settings = {SIZE_MEDIUM, DELAY_NORMAL, STEPS_MEDIUM, false}; // alapértelmezett beállítások
 
 // Beállítások menü elemei
 typedef enum
@@ -88,6 +123,7 @@ typedef enum
     SETTINGS_MENU_WORLD_SIZE,
     SETTINGS_MENU_DELAY,
     SETTINGS_MENU_SIM_STEPS,
+    SETTINGS_MENU_DEBUG,
     SETTINGS_MENU_BACK,
     SETTINGS_MENU_ITEM_COUNT
 } SettingsMenuItem;
@@ -96,6 +132,7 @@ const char *settings_menu_item_names[] = {
     "World size:",
     "Delay:",
     "Sim. Steps:",
+    "Debug Log:",
     "Vissza"};
 
 void init_display()
@@ -234,6 +271,10 @@ void display_settings_menu()
                 {
                     mvprintw(LINES / 2 - SETTINGS_MENU_ITEM_COUNT / 2 + i, COLS / 2, "< %s >", simulation_steps_names[current_settings.steps_choice]);
                 }
+                else if (i == SETTINGS_MENU_DEBUG)
+                {
+                    mvprintw(LINES / 2 - SETTINGS_MENU_ITEM_COUNT / 2 + i, COLS / 2, "< %s >", current_settings.debug_mode ? "ON" : "OFF");
+                }
                 attroff(COLOR_PAIR(COLOR_PAIR_SETTINGS_VALUE));
             }
             refresh();
@@ -274,6 +315,11 @@ void display_settings_menu()
                 current_settings.steps_choice = (current_settings.steps_choice - 1 + SIMULATION_STEPS_COUNT) % SIMULATION_STEPS_COUNT;
                 settings_changed = true;
             }
+            else if (selected_item == SETTINGS_MENU_DEBUG)
+            {
+                current_settings.debug_mode = !current_settings.debug_mode;
+                settings_changed = true;
+            }
             break;
         case KEY_RIGHT:
         case 'd':
@@ -291,6 +337,11 @@ void display_settings_menu()
             else if (selected_item == SETTINGS_MENU_SIM_STEPS)
             {
                 current_settings.steps_choice = (current_settings.steps_choice + 1) % SIMULATION_STEPS_COUNT;
+                settings_changed = true;
+            }
+            else if (selected_item == SETTINGS_MENU_DEBUG)
+            {
+                current_settings.debug_mode = !current_settings.debug_mode;
                 settings_changed = true;
             }
             break;
@@ -319,17 +370,17 @@ void draw_simulation_state(World *world, int step_number, int total_steps, WINDO
              count_entities_by_type(world, PLANT),
              count_entities_by_type(world, HERBIVORE),
              count_entities_by_type(world, CARNIVORE),
-             world->width, world->height);
+             world->global_width, world->global_height);
     attroff(COLOR_PAIR(COLOR_PAIR_INFO));
     werase(world_display_window);
     box(world_display_window, 0, 0); // keret, 0, 0 a karakterek
 
-    // Entitások kirajzolása a world->grid alapján
-    for (int y = 0; y < world->height; ++y)
+    // Entitások kirajzolása a world->local_grid alapján
+    for (int y = 0; y < world->global_height; ++y)
     {
-        for (int x = 0; x < world->width; ++x)
+        for (int x = 0; x < world->global_width; ++x)
         {
-            Entity *e = world->grid[y][x].entity;
+            Entity *e = world->local_grid[y][x].entity;
             if (e != NULL && e->energy > 0) // Ellenőrizzük, hogy van-e entitás és él-e
             {
                 char display_char = '?';
@@ -387,41 +438,402 @@ void draw_simulation_state(World *world, int step_number, int total_steps, WINDO
     wnoutrefresh(world_display_window); // Előkészíti a világ ablakának frissítését.
 }
 
+void draw_debug_window(WINDOW *debug_win)
+{
+    werase(debug_win);
+    box(debug_win, 0, 0);
+    mvwprintw(debug_win, 0, 2, " Debug Log ");
+
+    if (current_settings.debug_mode)
+    {
+        for (int i = 0; i < DEBUG_LOG_LINES; i++)
+        {
+            mvwprintw(debug_win, i + 1, 1, "%s", debug_log_buffer[i]);
+        }
+    }
+    else
+    {
+        mvwprintw(debug_win, 1, 1, "Debug mode is OFF. Enable in Settings.");
+    }
+    wnoutrefresh(debug_win);
+}
+
 void _commit_entity_to_next_state(World *world, Entity entity_data)
 {
+    EntityBuffer *out_top = &world->out_top;
+    EntityBuffer *out_bottom = &world->out_bottom;
     // Ellenőrzés, hogy van-e hely a next_entities tömbben
     if (world->next_entity_count >= MAX_TOTAL_ENTITIES)
     {
-        // fprintf(stderr, "FIGYELEM: next_entities tömb megtelt (%d/%d). Entitás (ID: %d) nem lett hozzáadva.\\n",
-        //         world->next_entity_count, MAX_TOTAL_ENTITIES, entity_data.id);
         return; // Nincs több hely
     }
-
-    int next_idx;
-#pragma omp atomic capture // atomikusan növeljük a next_entity_countot és elmentjük az eredeti értéket next_idx-be
-    next_idx = world->next_entity_count++;
-
-    if (next_idx >= MAX_TOTAL_ENTITIES)
-    {
-        // fprintf(stderr, "HIBA: next_entities kapacitás (%d) túlcsordult commit közben (idx: %d), ID: %d! Entitás elveszett.\\n",
-        //         MAX_TOTAL_ENTITIES, next_idx, entity_data.id);
-#pragma omp atomic update
-        world->next_entity_count--;
-        return;
+    int y = entity_data.position.y;
+    if(y < world->start_y){
+        if(out_top->count < out_top->capacity){
+            out_top->entities[out_top->count] = entity_data;
+            out_top->count++;
+            return;
+        }
     }
+    else if(y > world->end_y){
+        if(out_bottom->count < out_bottom->capacity){
+            out_bottom->entities[out_bottom->count] = entity_data;
+            out_bottom->count++;
+            return;
+        }
+    }
+    else {
+        int next_idx;
+#pragma omp atomic capture
+        next_idx = world->next_entity_count++;
 
-    world->next_entities[next_idx] = entity_data;
+        if(next_idx >= MAX_TOTAL_ENTITIES){
+#pragma omp atomic update
+            world->next_entity_count--;
+            return;
+        }
 
-    if (is_valid_pos(world, entity_data.position.x, entity_data.position.y))
-    {
+        world->next_entities[next_idx] = entity_data;
+
+        if(is_valid_pos(world, entity_data.position.x, entity_data.position.y)){
+            int local_y = get_local_y(world, y);
 #pragma omp critical
-        {
-            if (world->next_grid[entity_data.position.y][entity_data.position.x].entity == NULL)
             {
-                world->next_grid[entity_data.position.y][entity_data.position.x].entity = &world->next_entities[next_idx];
+                if (world->local_next_grid[local_y][entity_data.position.x].entity == NULL)
+                    world->local_next_grid[local_y][entity_data.position.x].entity = &world->next_entities[next_idx];
             }
         }
     }
+}
+
+void exchange_migrations(World *world){
+    EntityBuffer *out_top = &world->out_top;
+    EntityBuffer *out_bottom = &world->out_bottom;
+    int top_out_count = out_top->count;
+    int bottom_out_count = out_bottom->count;
+    int top_in_count = 0;
+    int bottom_in_count = 0;
+
+    if (world->rank % 2 == 0){
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Send(&bottom_out_count, 1, MPI_INT, world->bottom_neighbor_rank, 0, MPI_COMM_WORLD);
+        }
+        if (world->top_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Send(&top_out_count, 1, MPI_INT, world->top_neighbor_rank, 1, MPI_COMM_WORLD);
+        }
+        if (world->top_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Recv(&top_in_count, 1, MPI_INT, world->top_neighbor_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Recv(&bottom_in_count, 1, MPI_INT, world->bottom_neighbor_rank, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+    } else {
+        // Páratlan rankok: először fogadnak, aztán küldenek
+        if (world->top_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Recv(&top_in_count, 1, MPI_INT, world->top_neighbor_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Recv(&bottom_in_count, 1, MPI_INT, world->bottom_neighbor_rank, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Send(&bottom_out_count, 1, MPI_INT, world->bottom_neighbor_rank, 0, MPI_COMM_WORLD);
+        }
+        if (world->top_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Send(&top_out_count, 1, MPI_INT, world->top_neighbor_rank, 1, MPI_COMM_WORLD);
+        }
+    }
+    // 3. Buffer kapacitás biztosítása
+    if (top_in_count > out_top->capacity) {
+        out_top->capacity = top_in_count + 10;
+        out_top->entities = (Entity*)realloc(out_top->entities, out_top->capacity * sizeof(Entity));
+        if (!out_top->entities) {
+            fprintf(stderr, "Rank %d: Hiba a top buffer realloc során!\n", world->rank);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+    if (bottom_in_count > out_bottom->capacity) {
+        out_bottom->capacity = bottom_in_count + 10;
+        out_bottom->entities = (Entity*)realloc(out_bottom->entities, out_bottom->capacity * sizeof(Entity));
+        if (!out_bottom->entities) {
+            fprintf(stderr, "Rank %d: Hiba a bottom buffer realloc során!\n", world->rank);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+    
+    // 4. Entitások cseréje (ugyanaz a deadlock-elkerülő logika)
+    // FONTOS: out_top-ba a top szomszéd out_bottom-ját kapjuk (ő lefelé küld)
+    //         out_bottom-ba a bottom szomszéd out_top-ját kapjuk (ő felfelé küld)
+    if (world->rank % 2 == 0) {
+        // Páros rankok: először küldenek
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL && bottom_out_count > 0) {
+            MPI_Send(out_bottom->entities, bottom_out_count * sizeof(Entity), MPI_BYTE,
+                     world->bottom_neighbor_rank, 2, MPI_COMM_WORLD);
+        }
+        if (world->top_neighbor_rank != MPI_PROC_NULL && top_out_count > 0) {
+            MPI_Send(out_top->entities, top_out_count * sizeof(Entity), MPI_BYTE,
+                     world->top_neighbor_rank, 3, MPI_COMM_WORLD);
+        }
+        // Aztán fogadnak
+        if (world->top_neighbor_rank != MPI_PROC_NULL && top_in_count > 0) {
+            MPI_Recv(out_top->entities, top_in_count * sizeof(Entity), MPI_BYTE,
+                     world->top_neighbor_rank, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            out_top->count = top_in_count;
+        }
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL && bottom_in_count > 0) {
+            MPI_Recv(out_bottom->entities, bottom_in_count * sizeof(Entity), MPI_BYTE,
+                     world->bottom_neighbor_rank, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            out_bottom->count = bottom_in_count;
+        }
+    } else {
+            // Páratlan rankok: először fogadnak
+            if (world->top_neighbor_rank != MPI_PROC_NULL && top_in_count > 0) {
+                MPI_Recv(out_top->entities, top_in_count * sizeof(Entity), MPI_BYTE,
+                            world->top_neighbor_rank, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                out_top->count = top_in_count;
+            }
+            if (world->bottom_neighbor_rank != MPI_PROC_NULL && bottom_in_count > 0) {
+                MPI_Recv(out_bottom->entities, bottom_in_count * sizeof(Entity), MPI_BYTE,
+                            world->bottom_neighbor_rank, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                out_bottom->count = bottom_in_count;
+            }
+            // Aztán küldenek (a régi darabszámokkal)
+            if (world->bottom_neighbor_rank != MPI_PROC_NULL && bottom_out_count > 0) {
+                MPI_Send(out_bottom->entities, bottom_out_count * sizeof(Entity), MPI_BYTE,
+                            world->bottom_neighbor_rank, 2, MPI_COMM_WORLD);
+            }
+            if (world->top_neighbor_rank != MPI_PROC_NULL && top_out_count > 0) {
+                MPI_Send(out_top->entities, top_out_count * sizeof(Entity), MPI_BYTE,
+                            world->top_neighbor_rank, 3, MPI_COMM_WORLD);
+            }
+        }
+    for (int i = 0; i < out_top->count; i++){ //top szomszédtól jövő entitások amik már lokálba esnek
+        _commit_entity_to_next_state(world,out_top->entities[i]);
+    }
+    for (int i = 0; i < out_bottom->count; i++){ 
+        _commit_entity_to_next_state(world,out_bottom->entities[i]);
+    } 
+    out_top->count = 0;
+    out_bottom->count = 0;
+}
+
+void clear_ghosts(World *world)
+{
+    int ghost = world->ghost_layer_size;
+    int total_rows = world->local_height + 2 * ghost;
+    
+    // Felső ghost sávok törlése (0 ... ghost-1)
+    for (int i = 0; i < ghost; i++)
+    {
+        for (int j = 0; j < world->global_width; j++)
+        {
+            world->local_grid[i][j].entity = NULL;
+        }
+    }
+    
+    // Alsó ghost sávok törlése (ghost + local_height ... total_rows - 1)
+    int bottom_ghost_start = ghost + world->local_height;
+    for (int i = bottom_ghost_start; i < total_rows; i++)
+    {
+        for (int j = 0; j < world->global_width; j++)
+        {
+            world->local_grid[i][j].entity = NULL;
+        }
+    }
+    
+}
+
+void pack_border_entities(World *world){
+    EntityBuffer *out_top = &world->out_top;
+    EntityBuffer *out_bottom = &world->out_bottom;
+    int ghost = world->ghost_layer_size;
+
+    //Felső határ
+    out_top->count = 0;
+    for (int i = ghost; i < 2 * ghost; i++)
+    {
+        for (int j = 0; j < world->global_width; j++){
+            if (out_top->count < out_top->capacity){
+                if (world->local_grid[i][j].entity != NULL){
+                    out_top->entities[out_top->count] = *world->local_grid[i][j].entity;
+                    out_top->count++;
+                }
+            }
+        }
+    }
+
+    //Alsó határ
+    out_bottom->count = 0;
+    int bottom_start = world->local_height;
+    for (int i = bottom_start; i < bottom_start + ghost; i++){
+        for (int j = 0; j < world->global_width; j++){
+            if(out_bottom->count < out_bottom->capacity){
+                if (world->local_grid[i][j].entity != NULL){
+                    out_bottom->entities[out_bottom->count] = *world->local_grid[i][j].entity;
+                    out_bottom->count++;
+                }
+            }
+        }
+    }
+}
+
+void unpack_border_entities(World *world){
+    EntityBuffer *out_top = &world->out_top;
+    EntityBuffer *out_bottom = &world->out_bottom;
+    int ghost = world->ghost_layer_size;
+    clear_ghosts(world);
+    
+    // Felső ghost sáv feltöltése (0 ... ghost-1)
+    for (int i = 0; i < out_top->count; i++){
+        Entity *entity = &out_top->entities[i];
+        int x = entity->position.x;
+        int y = entity->position.y;
+        if(is_valid_pos(world, x, y)){
+            int local_y = get_local_y(world, y);
+            if (local_y < ghost){
+                world->local_grid[local_y][x].entity = entity;
+            }
+            else{
+                printf("ERROR Top Ghost: Rank %d, Entity ID %d, Y=%d, Local Y=%d (Ghost Size=%d)\n", 
+                    world->rank, entity->id, y, local_y, ghost);
+            }
+        }
+    }
+    
+    // Alsó ghost sáv feltöltése (ghost + local_height ... ghost + local_height + ghost - 1)
+    int bottom_ghost_start = ghost + world->local_height;
+    for (int i = 0; i < out_bottom->count; i++){
+        Entity *entity = &out_bottom->entities[i];
+        int x = entity->position.x;
+        int y = entity->position.y;
+        if(is_valid_pos(world, x, y)){
+            int local_y = get_local_y(world, y);
+            if (local_y >= bottom_ghost_start){
+                world->local_grid[local_y][x].entity = entity;
+            }
+            else{
+                printf("ERROR Top Ghost: Rank %d, Entity ID %d, Y=%d, Local Y=%d (Ghost Size=%d)\n", 
+                    world->rank, entity->id, y, local_y, ghost);
+            }
+        }
+    }
+}
+
+void exchange_ghosts(World *world){
+    // 1. Pack: saját határ-entitások összegyűjtése a pufferekbe (KÜLDENDŐ ADAT)
+    pack_border_entities(world);
+    
+    EntityBuffer *out_top = &world->out_top;       // Ebből küldünk, majd ebbe fogadunk (másolással)
+    EntityBuffer *out_bottom = &world->out_bottom; // Ebből küldünk, majd ebbe fogadunk
+    
+    // Fogadó pufferek és darabszámok
+    Entity *in_top_entities = NULL;
+    Entity *in_bottom_entities = NULL;
+    int in_top_count = 0;
+    int in_bottom_count = 0;
+
+    // 2. Darabszámok cseréje
+    if (world->rank % 2 == 0) {
+        // Páros: küld, aztán fogad
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Send(&out_bottom->count, 1, MPI_INT, world->bottom_neighbor_rank, 0, MPI_COMM_WORLD);
+        }
+        if (world->top_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Send(&out_top->count, 1, MPI_INT, world->top_neighbor_rank, 1, MPI_COMM_WORLD);
+        }
+        
+        if (world->top_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Recv(&in_top_count, 1, MPI_INT, world->top_neighbor_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Recv(&in_bottom_count, 1, MPI_INT, world->bottom_neighbor_rank, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+    } else {
+        // Páratlan: fogad, aztán küld
+        if (world->top_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Recv(&in_top_count, 1, MPI_INT, world->top_neighbor_rank, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Recv(&in_bottom_count, 1, MPI_INT, world->bottom_neighbor_rank, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Send(&out_bottom->count, 1, MPI_INT, world->bottom_neighbor_rank, 0, MPI_COMM_WORLD);
+        }
+        if (world->top_neighbor_rank != MPI_PROC_NULL) {
+            MPI_Send(&out_top->count, 1, MPI_INT, world->top_neighbor_rank, 1, MPI_COMM_WORLD);
+        }
+    }
+    
+    // 3. Fogadó pufferek allokálása
+    if (in_top_count > 0) {
+        in_top_entities = (Entity*)malloc(in_top_count * sizeof(Entity));
+    }
+    if (in_bottom_count > 0) {
+        in_bottom_entities = (Entity*)malloc(in_bottom_count * sizeof(Entity));
+    }
+
+    // 4. Entitások cseréje
+    if (world->rank % 2 == 0) {
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL && out_bottom->count > 0) {
+            MPI_Send(out_bottom->entities, out_bottom->count * sizeof(Entity), MPI_BYTE, world->bottom_neighbor_rank, 2, MPI_COMM_WORLD);
+        }
+        if (world->top_neighbor_rank != MPI_PROC_NULL && out_top->count > 0) {
+            MPI_Send(out_top->entities, out_top->count * sizeof(Entity), MPI_BYTE, world->top_neighbor_rank, 3, MPI_COMM_WORLD);
+        }
+        
+        if (world->top_neighbor_rank != MPI_PROC_NULL && in_top_count > 0) {
+            MPI_Recv(in_top_entities, in_top_count * sizeof(Entity), MPI_BYTE, world->top_neighbor_rank, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL && in_bottom_count > 0) {
+            MPI_Recv(in_bottom_entities, in_bottom_count * sizeof(Entity), MPI_BYTE, world->bottom_neighbor_rank, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+    } else {
+        if (world->top_neighbor_rank != MPI_PROC_NULL && in_top_count > 0) {
+            MPI_Recv(in_top_entities, in_top_count * sizeof(Entity), MPI_BYTE, world->top_neighbor_rank, 2, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL && in_bottom_count > 0) {
+            MPI_Recv(in_bottom_entities, in_bottom_count * sizeof(Entity), MPI_BYTE, world->bottom_neighbor_rank, 3, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+        
+        if (world->bottom_neighbor_rank != MPI_PROC_NULL && out_bottom->count > 0) {
+            MPI_Send(out_bottom->entities, out_bottom->count * sizeof(Entity), MPI_BYTE, world->bottom_neighbor_rank, 2, MPI_COMM_WORLD);
+        }
+        if (world->top_neighbor_rank != MPI_PROC_NULL && out_top->count > 0) {
+            MPI_Send(out_top->entities, out_top->count * sizeof(Entity), MPI_BYTE, world->top_neighbor_rank, 3, MPI_COMM_WORLD);
+        }
+    }
+    
+    // 5. Fogadott adatok átmozgatása a perzisztens pufferekbe (out_top / out_bottom)
+    // Először megnöveljük a kapacitást ha kell
+    if (in_top_count > out_top->capacity) {
+        out_top->capacity = in_top_count;
+        out_top->entities = (Entity*)realloc(out_top->entities, out_top->capacity * sizeof(Entity));
+    }
+    // Bemásoljuk
+    out_top->count = in_top_count;
+    if (in_top_count > 0 && in_top_entities) {
+        memcpy(out_top->entities, in_top_entities, in_top_count * sizeof(Entity));
+    } else {
+        out_top->count = 0; // Ha nem kaptunk semmit, akkor üres
+    }
+    
+    if (in_bottom_count > out_bottom->capacity) {
+        out_bottom->capacity = in_bottom_count;
+        out_bottom->entities = (Entity*)realloc(out_bottom->entities, out_bottom->capacity * sizeof(Entity));
+    }
+    out_bottom->count = in_bottom_count;
+    if (in_bottom_count > 0 && in_bottom_entities) {
+        memcpy(out_bottom->entities, in_bottom_entities, in_bottom_count * sizeof(Entity));
+    } else {
+        out_bottom->count = 0; // Ha nem kaptunk semmit, akkor üres
+    }
+    
+    // Ideiglenes pufferek felszabadítása
+    if (in_top_entities) free(in_top_entities);
+    if (in_bottom_entities) free(in_bottom_entities);
+
+    // 6. Unpack: a fogadott entitások (most már az out_... pufferekben) elhelyezése a ghost sávokba
+    unpack_border_entities(world);
 }
 
 void simulate_step(World *world, int current_step_number)
@@ -429,6 +841,7 @@ void simulate_step(World *world, int current_step_number)
     if (!world)
         return;
 
+    exchange_ghosts(world);
     double step_start_time, step_end_time;
     double carnivore_start_time, carnivore_end_time;
     double herbivore_start_time, herbivore_end_time;
@@ -440,17 +853,16 @@ void simulate_step(World *world, int current_step_number)
     // - A next_entity_count nullázása.
     // - A next_grid celláinak kiürítése
     world->next_entity_count = 0;
-    for (int i = 0; i < world->height; i++)
+    int ghost = world->ghost_layer_size;
+    int total_rows = world->local_height + 2 *ghost;
+    for (int i = 0; i < total_rows; i++)
     {
-        for (int j = 0; j < world->width; j++)
+        for (int j = 0; j < world->global_width; j++)
         {
-            world->next_grid[i][j].entity = NULL;
+            world->local_next_grid[i][j].entity = NULL;
         }
     }
-    // int estimated_min_capacity = world->entity_count + (world->entity_count / 2) + 100;
-    // if (estimated_min_capacity < INITIAL_ENTITY_CAPACITY)
-    //     estimated_min_capacity = INITIAL_ENTITY_CAPACITY;
-    // _ensure_next_entity_capacity(world, estimated_min_capacity); // Ezt a hívást eltávolítjuk
+
 
     // 1. RAGADOZÓK FELDOLGOZÁSA
     // Minden ragadozó entitás feldolgozása párhuzamosan.
@@ -576,15 +988,17 @@ void simulate_step(World *world, int current_step_number)
     }
     plant_end_time = omp_get_wtime();
 
+    exchange_migrations(world);
+
     // Állapotváltás (double buffering swap):
     // A `grid` és `next_grid` (cellamátrixok), valamint az `entities` és `next_entities`
     // (entitáslisták) pointereit megcseréljük. Így a `next_` állapotok válnak
     // az aktuális állapottá a következő lépéshez, és a korábbi aktuális állapotok
     // újra felhasználhatók lesznek a következő `next_` állapotok tárolására.
     // Ez hatékony, mert nem igényel nagyméretű adatmozgatást, csak pointercseréket.
-    Cell **temp_grid_ptr = world->grid;
-    world->grid = world->next_grid;
-    world->next_grid = temp_grid_ptr;
+    Cell **temp_grid_ptr = world->local_grid;
+    world->local_grid = world->local_next_grid;
+    world->local_next_grid = temp_grid_ptr;
 
     Entity *temp_entities_ptr = world->entities;
     world->entities = world->next_entities;
@@ -598,26 +1012,28 @@ void simulate_step(World *world, int current_step_number)
 
     step_end_time = omp_get_wtime();
 
-    // Időmérési eredmények kiírása az stderr-re
-    fprintf(stderr, "Step %d timings: Total: %.4fms, Carnivores: %.4fms, Herbivores: %.4fms, Plants: %.4fms | Threads: %d\n",
-            current_step_number,
-            (step_end_time - step_start_time) * 1000.0,
-            (carnivore_end_time - carnivore_start_time) * 1000.0,
-            (herbivore_end_time - herbivore_start_time) * 1000.0,
-            (plant_end_time - plant_start_time) * 1000.0,
-            omp_get_max_threads()); // Hozzáadva a szálak száma
+    // Időmérési eredmények kiírása az stderr-re (csak Debug módban)
+    if (current_settings.debug_mode)
+    {
+        add_debug_log("Step %d: T:%.2fms (C:%.2f H:%.2f P:%.2f)",
+                      current_step_number,
+                      (step_end_time - step_start_time) * 1000.0,
+                      (carnivore_end_time - carnivore_start_time) * 1000.0,
+                      (herbivore_end_time - herbivore_start_time) * 1000.0,
+                      (plant_end_time - plant_start_time) * 1000.0);
+    }
 }
 
 // Segédfüggvények a manuális spawnoláshoz
 static bool find_random_empty_cell_for_spawn(World *world, Coordinates *out_pos)
 {
     int attempts = 0;
-    const int max_attempts = world->width * world->height;
+    const int max_attempts = world->global_width * world->global_height;
     do
     {
-        int r_x = rand() % world->width;
-        int r_y = rand() % world->height;
-        if (world->grid[r_y][r_x].entity == NULL)
+        int r_x = rand() % world->global_width;
+        int r_y = rand() % world->global_height;
+        if (world->local_grid[r_y][r_x].entity == NULL)
         {
             out_pos->x = r_x;
             out_pos->y = r_y;
@@ -686,7 +1102,7 @@ static void spawn_entity_manually(World *world, EntityType type, int current_ste
         new_entity->last_eating_step = -1;
         new_entity->just_spawned_by_keypress = use_visual_spawn_highlight;
 
-        world->grid[spawn_pos.y][spawn_pos.x].entity = new_entity;
+        world->local_grid[spawn_pos.y][spawn_pos.x].entity = new_entity;
         world->entity_count++;
     }
     else
@@ -705,7 +1121,7 @@ void run_simulation(World *world, int simulation_steps_to_run, long step_delay_m
     // Világ megjelenítésére szolgáló dedikált ncurses ablak létrehozása.
     // Az információs sávnak 1 sort hagyunk fent (stdscr tetején), így az ablak y pozíciója 1.
     // A keret miatt (+2) szélesség és magasság szükséges.
-    WINDOW *world_win = newwin(world->height + 2, world->width + 2, 1, (COLS - (world->width + 2)) / 2);
+    WINDOW *world_win = newwin(world->global_height + 2, world->global_width + 2, 1, (COLS - (world->global_width + 2)) / 2);
     if (!world_win)
     {
         cleanup_display();
@@ -713,10 +1129,23 @@ void run_simulation(World *world, int simulation_steps_to_run, long step_delay_m
         return;
     }
 
+    // Debug ablak létrehozása a világ ablaka alatt
+    // 3 sor tartalom + 2 sor keret = 5 sor magasság
+    int debug_height = DEBUG_LOG_LINES + 2;
+    int debug_y = 1 + world->global_height + 2; // world_win kezdete (1) + magassága
+    WINDOW *debug_win = newwin(debug_height, world->global_width + 2, debug_y, (COLS - (world->global_width + 2)) / 2);
+
+    init_debug_log();
+
     for (int step = 0; step < simulation_steps_to_run; step++)
     {
         simulate_step(world, step);
         draw_simulation_state(world, step, simulation_steps_to_run, world_win); // Ablak átadása
+
+        if (debug_win)
+        {
+            draw_debug_window(debug_win);
+        }
 
         doupdate(); // Fizikai képernyő frissítése az összes előkészített változással (stdscr és world_win).
 
@@ -741,6 +1170,9 @@ void run_simulation(World *world, int simulation_steps_to_run, long step_delay_m
     }
 
     delwin(world_win); // A dedikált világ ablak törlése.
+    if (debug_win)
+        delwin(debug_win);
+    
     timeout(-1);       // Visszaállítjuk a getch() alapértelmezett blokkoló viselkedését a menühöz.
     clear();           // Teljes képernyő törlése a szimuláció után.
     refresh();         // A törölt képernyő tényleges frissítése.
@@ -748,62 +1180,98 @@ void run_simulation(World *world, int simulation_steps_to_run, long step_delay_m
 
 int main(int argc, char *argv[])
 {
+    MPI_Init(&argc, &argv);
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
     // Véletlenszám-generátor inicializálása fix seed-del az ismételhetőséghez
-    srand(RANDOM_SEED);
-
-    // A setlocale(LC_ALL, "") kritikus fontosságú az ncurses számára, hogy helyesen
-    // kezelje a nem-ASCII karaktereket, mint például az ékezetes betűk a menüben,
-    // vagy a box-drawing karakterek a keretekhez (ha használnánk őket).
-    // Ezt az init_display()-be mozgattuk, ami jobb helyen van.
-    // init_display() hívja meg a setlocale-t.
-
-    init_display(); // Ncurses és locale inicializálása.
-
+    srand(RANDOM_SEED + rank);
+    
     World *world = NULL; // Világ pointer, kezdetben null.
-
-    MenuItem choice;
-    do
-    {
-        choice = display_main_menu();
-
-        switch (choice)
+    if (rank==0){ // Master kezeli a displayt
+        init_display(); // Ncurses és locale inicializálása.
+        
+        
+        
+        MenuItem choice;
+        do
         {
-        case MENU_START:
-            if (world)
-            { // Ha volt már korábbi szimuláció, a hozzá tartozó memóriát fel kell szabadítani.
-                free_world(world);
-                world = NULL; // Fontos, hogy nullázzuk, jelezve, hogy nincs aktív világ.
-            }
-            // Világ létrehozása az aktuális beállítások alapján.
-            world = create_world(world_size_values[current_settings.world_size_choice].x, world_size_values[current_settings.world_size_choice].y);
-            if (!world)
+            choice = display_main_menu();
+            
+            switch (choice)
             {
-                cleanup_display();
-                fprintf(stderr, "Hiba a világ létrehozásakor!\n");
-                return 1; // Kritikus hiba, kilépés.
-            }
-            // Kezdeti entitásokkal való feltöltés a simulation_constants.h-ban definiált értékekkel.
-            initialize_world(world, INITIAL_PLANTS, INITIAL_HERBIVORES, INITIAL_CARNIVORES);
-            run_simulation(world, simulation_steps_values[current_settings.steps_choice], delay_values_ms[current_settings.delay_choice]);
-            // A run_simulation után a képernyő tiszta, a főmenü újra megjelenik.
-            break;
-        case MENU_SETTINGS:
-            display_settings_menu();
-            break;
-        case MENU_EXIT:
-            // Kilépés, a ciklus feltétele megszakítja
-            break;
-        default: // Nem várt eset
-            break;
-        }
-    } while (choice != MENU_EXIT);
+                case MENU_START:
+                    if (world)
+                    { // Ha volt már korábbi szimuláció, a hozzá tartozó memóriát fel kell szabadítani.
+                        free_world(world);
+                        world = NULL; // Fontos, hogy nullázzuk, jelezve, hogy nincs aktív világ.
+                    }
+                    int cmd = CMD_START;
+                    MPI_Bcast(&cmd, 1, MPI_INT,0, MPI_COMM_WORLD);
+                    int width = world_size_values[current_settings.world_size_choice].x;
+                    int height = world_size_values[current_settings.world_size_choice].y;
+                    int steps = simulation_steps_values[current_settings.steps_choice];
+                    int params[3] = {width, height, steps};
+                    MPI_Bcast(params, 3, MPI_INT, 0, MPI_COMM_WORLD);
 
+                    // Világ létrehozása az aktuális beállítások alapján.
+                    world = create_world(world_size_values[current_settings.world_size_choice].x, world_size_values[current_settings.world_size_choice].y, rank, size);
+                    // world = create_world(world_size_values[current_settings.world_size_choice].x, world_size_values[current_settings.world_size_choice].y);
+                    if (!world)
+                    {
+                        cleanup_display();
+                        fprintf(stderr, "Hiba a világ létrehozásakor!\n");
+                        return 1; // Kritikus hiba, kilépés.
+                    }
+                    // Kezdeti entitásokkal való feltöltés a simulation_constants.h-ban definiált értékekkel.
+                    initialize_world(world, INITIAL_PLANTS, INITIAL_HERBIVORES, INITIAL_CARNIVORES);
+                    run_simulation(world, simulation_steps_values[current_settings.steps_choice], delay_values_ms[current_settings.delay_choice]);
+                    // A run_simulation után a képernyő tiszta, a főmenü újra megjelenik.
+                    break;
+                case MENU_SETTINGS:
+                    display_settings_menu();
+                    break;
+                case MENU_EXIT:
+                    cmd = CMD_EXIT;
+                    MPI_Bcast(&cmd, 1, MPI_INT, 0, MPI_COMM_WORLD);
+                    // Kilépés, a ciklus feltétele megszakítja
+                    break;
+                default: // Nem várt eset
+                    break;
+            }
+        } while (choice != MENU_EXIT);
+    
+    } else { // WORKER ÁG
+        while (1) {
+            int cmd; // itt fogjuk a kapott parancsot tárolni
+            MPI_Bcast(&cmd, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            if (cmd == CMD_START){
+                int params[3];
+                MPI_Bcast(params, 3, MPI_INT, 0, MPI_COMM_WORLD);
+                int width = params[0];
+                int height = params[1];
+                int steps = params[2];
+                World *world = create_world(width, height, rank, size);
+                if (!world){
+                    fprintf(stderr, "Hiba a világ létrehozásakor!\n");
+                }
+                initialize_world(world, INITIAL_PLANTS, INITIAL_HERBIVORES, INITIAL_CARNIVORES);
+                run_simulation(world, steps, 0);
+            }
+            else if (cmd == CMD_EXIT){
+                    break;
+                }
+        }
+    }
     // A program befejezése előtt, ha létezik még világ (pl. ha nem a 'Kilépés'-sel, hanem 'q'-val léptek ki a szim.-ból),
     // akkor annak memóriáját fel kell szabadítani.
     if (world)
     {
         free_world(world);
     }
-    cleanup_display(); // Ncurses lezárása.
+    if (rank==0) cleanup_display(); // Ncurses lezárása.
+    MPI_Finalize();
     return 0;
 }
+

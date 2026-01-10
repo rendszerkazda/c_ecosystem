@@ -91,8 +91,10 @@ void process_herbivore_actions_parallel(World *world, int current_step_number, E
     {
         // Célpont keresése a látótávolságon belül.
         Entity *target_plant = find_target_in_range(world, current_herbivore_state_in_entities_array->position, next_herbivore_state_prototype->sight_range, PLANT);
-        // Evés csak akkor, ha a célpont közvetlenül szomszédos.
-        if (target_plant && are_positions_adjacent(current_herbivore_state_in_entities_array->position, target_plant->position))
+        // Evés csak akkor, ha a célpont közvetlenül szomszédos ÉS a saját területünkön van (MPI szabály).
+        // Ghost entitást nem ehetünk meg távolról, mert azt a szomszéd is birtokolja.
+        if (target_plant && are_positions_adjacent(current_herbivore_state_in_entities_array->position, target_plant->position) &&
+            is_local(world, target_plant->position.y))
         {
             bool successfully_ate = false;
             // Kritikus szakasz a célpont energiájának módosításához, megelőzve a versenyhelyzeteket,
@@ -152,7 +154,8 @@ void process_herbivore_actions_parallel(World *world, int current_step_number, E
     {
         // Célpont keresése az aktuális (next_herbivore_state_prototype->position) pozíció körül.
         Entity *target_plant_for_eat = find_target_in_range(world, next_herbivore_state_prototype->position, next_herbivore_state_prototype->sight_range, PLANT);
-        if (target_plant_for_eat && are_positions_adjacent(next_herbivore_state_prototype->position, target_plant_for_eat->position))
+        if (target_plant_for_eat && are_positions_adjacent(next_herbivore_state_prototype->position, target_plant_for_eat->position) &&
+            is_local(world, target_plant_for_eat->position.y))
         {
             bool successfully_ate = false;
             // Kritikus szakasz a célpont energiájának módosításához.
@@ -240,8 +243,9 @@ void process_carnivore_actions_parallel(World *world, int current_step_number, E
     {
         // Célpont (növényevő) keresése a látótávolságon belül, az eredeti pozíció alapján
         Entity *target_herbivore = find_target_in_range(world, current_carnivore_state_in_entities_array->position, next_carnivore_state_prototype->sight_range, HERBIVORE);
-        // Evés csak akkor, ha a célpont közvetlenül szomszédos
-        if (target_herbivore && are_positions_adjacent(current_carnivore_state_in_entities_array->position, target_herbivore->position))
+        // Evés csak akkor, ha a célpont közvetlenül szomszédos ÉS a saját területünkön van
+        if (target_herbivore && are_positions_adjacent(current_carnivore_state_in_entities_array->position, target_herbivore->position) &&
+            is_local(world, target_herbivore->position.y))
         {
             bool successfully_ate_herbivore = false;
             // Kritikus szakasz a célpont (növényevő) energiájának módosítására
@@ -301,7 +305,8 @@ void process_carnivore_actions_parallel(World *world, int current_step_number, E
     {
         // Célpont keresése az aktuális (next_carnivore_state_prototype->position) pozíció körül
         Entity *target_herbivore_for_eat = find_target_in_range(world, next_carnivore_state_prototype->position, next_carnivore_state_prototype->sight_range, HERBIVORE);
-        if (target_herbivore_for_eat && are_positions_adjacent(next_carnivore_state_prototype->position, target_herbivore_for_eat->position))
+        if (target_herbivore_for_eat && are_positions_adjacent(next_carnivore_state_prototype->position, target_herbivore_for_eat->position) &&
+            is_local(world, target_herbivore_for_eat->position.y))
         {
             bool successfully_ate_herbivore = false;
             // Kritikus szakasz a célpont energiájának módosításához.
@@ -365,41 +370,33 @@ void process_carnivore_actions_parallel(World *world, int current_step_number, E
     }
 }
 
-// Segédfüggvény, amely megkeresi a legközelebbi, adott típusú célpontot a megadott center pozíció körüli range látótávolságon belül
-// Csak élő (pozitív energiájú) és még nem megevett entitásokat vesz figyelembe
-// A keresés a world->entities tömbön (azaz a szimulációs lépés eleji állapoton) történik
-// Végigiterál az összes entitáson, és kiválasztja azt, amelyik:
-//  1. Megfelel a target_type-nak
-//  2. Élő és nem EATEN_ENERGY_MARKER
-//  3. A center-től számított Manhattan-távolsága kisebb vagy egyenlő, mint range
-//  4. Az összes ilyen közül a legkisebb Manhattan-távolsággal rendelkezik
-// Ha több entitás is azonos minimális távolságra van, az iteráció során először megtaláltat adja vissza
-// Visszaadja a legközelebbi célpontra mutató pointert, vagy NULL-t, ha nincs ilyen
+// Grid-alapú keresés a hatékonyság és a ghost cellák elérése érdekében
 Entity *find_target_in_range(World *world, Coordinates center, int range, EntityType target_type)
 {
-    if (!world || range < 0)
-        return NULL;
+    if (!world || range < 0) return NULL;
 
     Entity *closest_target = NULL;
-    int min_manhattan_dist = range + 1; // Kezdeti minimális távolság, aminél nagyobbat nem fogadunk el.
+    int min_manhattan_dist = range + 1;
 
-    for (int i = 0; i < world->entity_count; ++i)
-    {
-        Entity *potential_target = &world->entities[i];
+    for (int dy = -range; dy <= range; dy++) {
+        for (int dx = -range; dx <= range; dx++) {
+            if (abs(dx) + abs(dy) > range) continue;
+            
+            int nx = center.x + dx;
+            int ny = center.y + dy;
+            
+            if (is_valid_pos(world, nx, ny)) {
+                int local_y = get_local_y(world, ny);
+                Entity *potential_target = world->local_grid[local_y][nx].entity;
 
-        if (potential_target->type == target_type &&
+                if (potential_target && potential_target->type == target_type &&
             potential_target->energy > 0 && potential_target->energy != EATEN_ENERGY_MARKER)
         {
-            int dx = abs(potential_target->position.x - center.x);
-            int dy = abs(potential_target->position.y - center.y);
-            int manhattan_dist = dx + dy;
-
-            if (manhattan_dist <= range) // Hatótávon belül van.
-            {
-                if (manhattan_dist < min_manhattan_dist)
-                {
-                    min_manhattan_dist = manhattan_dist;
+                    int dist = abs(dx) + abs(dy);
+                    if (dist < min_manhattan_dist) {
+                        min_manhattan_dist = dist;
                     closest_target = potential_target;
+                    }
                 }
             }
         }
